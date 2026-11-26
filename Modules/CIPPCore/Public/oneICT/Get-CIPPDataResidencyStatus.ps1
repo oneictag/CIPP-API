@@ -11,7 +11,9 @@ function Get-CIPPDataResidencyStatus {
         What CIPP can read is which Message Center post the tenant received, which tells the factory default:
           MC1470878 = setting OFF by default (must be switched on before 14.12.2026)
           MC1470876 = setting ON by default (only check)
-          neither   = tenant probably not eligible (ADR, Multi-Geo, no Legacy Move participation)
+          neither   = factory default unknown (not eligible, ADR/Multi-Geo, or a tenant created after the posts;
+                      Microsoft documents OFF as default for eligible new tenants) - check in the Admin Center
+        The setting keeps data in the tenant's own geography (CH, DE, FR, NO or SE), so the country is shown too.
         The post shows the starting value, not today's value, so a confirmation recorded by a technician (after
         changing the setting in the Admin Center) takes precedence.
 
@@ -32,7 +34,7 @@ function Get-CIPPDataResidencyStatus {
     $Default = switch ($DefaultState) {
         'Off' { 'AUS ab Werk (MC1470878)' }
         'On' { 'AN ab Werk (MC1470876)' }
-        'None' { 'keine Meldung' }
+        'None' { 'keine Meldung (unbekannt)' }
         'Error' { 'nicht messbar' }
         default { 'nicht gemessen' }
     }
@@ -45,8 +47,8 @@ function Get-CIPPDataResidencyStatus {
         switch ($DefaultState) {
             'Off' { 'AUS ab Werk', 'aktivieren bis 14.12.2026', 'error' }
             'On' { 'AN ab Werk', 'im Admin Center kurz kontrollieren', 'warning' }
-            'None' { 'keine Meldung', 'Stichprobe im Admin Center (vermutlich nicht berechtigt)', 'warning' }
-            'Error' { 'nicht messbar', 'Messfehler pruefen (z.B. Conditional Access sperrt CIPP)', 'warning' }
+            'None' { 'keine Meldung', 'im Admin Center pruefen (Ausgangswert unbekannt)', 'warning' }
+            'Error' { 'nicht messbar', 'Messfehler pruefen und erneut messen', 'warning' }
             default { 'nicht gemessen', "Aktion 'Status messen' ausfuehren", 'info' }
         }
     }
@@ -61,6 +63,7 @@ function Get-CIPPDataResidencyStatus {
         Severity            = $Severity
         NextStep            = $Action
         FactoryDefault      = $Default
+        Country             = [string]$Record.Country
         MessageCenterId     = [string]$Record.MessageCenterId
         MeasuredAt          = $Record.MeasuredAt
         MeasureError        = [string]$Record.MeasureError

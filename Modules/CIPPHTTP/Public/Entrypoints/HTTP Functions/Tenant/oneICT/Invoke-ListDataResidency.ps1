@@ -12,6 +12,15 @@ function Invoke-ListDataResidency {
 
     $TenantFilter = $Request.Query.tenantFilter
 
+    # No filter must not turn into an implicit all-tenants list: roles that block AllTenants are only enforced
+    # when AllTenants is named. Tenant groups arrive here already normalised to tenantFilter=AllTenants.
+    if ([string]::IsNullOrWhiteSpace($TenantFilter)) {
+        return ([HttpResponseContext]@{
+                StatusCode = [HttpStatusCode]::BadRequest
+                Body       = 'tenantFilter is required.'
+            })
+    }
+
     try {
         # Get-Tenants applies the caller's tenant scope and the tenant group for AllTenants
         $Tenants = if ($TenantFilter -eq 'AllTenants') {

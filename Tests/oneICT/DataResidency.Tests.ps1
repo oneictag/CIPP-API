@@ -73,6 +73,9 @@ Describe 'Update-CIPPDataResidencyMeasurement' {
                     'on.ch' { @(@{ id = 'off'; status = 404 }, @{ id = 'on'; status = 200 }) }
                     'none.ch' { @(@{ id = 'off'; status = 404 }, @{ id = 'on'; status = 404 }) }
                     'denied.ch' { @(@{ id = 'off'; status = 403; body = @{ error = @{ message = 'Forbidden' } } }, @{ id = 'on'; status = 403 }) }
+                    'half.ch' { @(@{ id = 'off'; status = 429 }, @{ id = 'on'; status = 200 }) }
+                    'missing.ch' { @(@{ id = 'on'; status = 200 }) }
+                    'de.ch' { @(@{ id = 'off'; status = 200 }, @{ id = 'on'; status = 404 }, @{ id = 'org'; status = 200; body = @{ value = @(@{ countryLetterCode = 'DE' }) } }) }
                     default { @() }
                 }
                 [pscustomobject]@{ TenantFilter = $Item.TenantFilter; Responses = $Responses; Error = $(if ($Item.TenantFilter -eq 'ca.ch') { 'AADSTS53003 blocked by Conditional Access' }) }
@@ -91,6 +94,19 @@ Describe 'Update-CIPPDataResidencyMeasurement' {
         ($Result | Where-Object defaultDomainName -EQ 'ca.ch').MeasureError | Should -Match 'Conditional Access'
     }
 
+    It 'never stores a half-failed batch as on by default' {
+        $Result = Update-CIPPDataResidencyMeasurement -Tenants @('half', 'missing' | ForEach-Object { New-TestTenant $_ })
+        ($Result | Where-Object defaultDomainName -EQ 'half.ch').DefaultState | Should -Be 'Error'
+        ($Result | Where-Object defaultDomainName -EQ 'half.ch').MeasureError | Should -Match '429 for MC1470878'
+        ($Result | Where-Object defaultDomainName -EQ 'missing.ch').DefaultState | Should -Be 'Error'
+    }
+
+    It 'stores the tenant country, since in-country means the tenant geography' {
+        $Result = Update-CIPPDataResidencyMeasurement -Tenants @(New-TestTenant 'de')
+        $Result.Country | Should -Be 'DE'
+        Should -Invoke New-GraphMultiTenantBulkRequest -Times 1 -ParameterFilter { $TenantRequests[0].Requests.url -contains '/organization?$select=countryLetterCode' }
+    }
+
     It 'uses the delegated token and merges, so confirmations survive a new measurement' {
         $null = Update-CIPPDataResidencyMeasurement -Tenants @(New-TestTenant 'off')
         Should -Invoke New-GraphMultiTenantBulkRequest -Times 1 -ParameterFilter { $AsApp -eq $false -and $Version -eq 'v1.0' }
@@ -99,6 +115,13 @@ Describe 'Update-CIPPDataResidencyMeasurement' {
 }
 
 Describe 'Invoke-ListDataResidency' {
+    It 'refuses a request without tenantFilter instead of listing every tenant' {
+        Mock Get-Tenants { @(New-TestTenant 'a') }
+        $Response = Invoke-ListDataResidency -Request ([pscustomobject]@{ Query = @{} })
+        $Response.StatusCode | Should -Be 400
+        Should -Invoke Get-Tenants -Times 0
+    }
+
     It 'lists every tenant, the ones needing action first' {
         Mock Get-Tenants { @(New-TestTenant 'zeta'; New-TestTenant 'alpha'; New-TestTenant 'beta') }
         Mock Get-CIPPAzDataTableEntity {
@@ -133,6 +156,15 @@ Describe 'Invoke-ExecDataResidency' {
         Should -Invoke Add-CIPPAzDataTableEntity -Times 1 -ParameterFilter { $Entity.ConfirmedState -eq 'On' -and $Entity.ConfirmedBy -eq 'tech@oneict.ch' -and $Entity.RowKey -eq 'id-kunde' }
     }
 
+    It 'measures a tenant group from the router-normalised query' {
+        Mock Update-CIPPDataResidencyMeasurement { foreach ($T in $Tenants) { [pscustomobject]@{ defaultDomainName = $T.defaultDomainName; DefaultState = 'Off' } } }
+        $Request = New-ExecRequest @{ Action = 'Measure' }
+        $Request | Add-Member -NotePropertyName Query -NotePropertyValue @{ tenantFilter = 'AllTenants'; tenantGroup = 'g1' }
+        $Response = Invoke-ExecDataResidency -Request $Request
+        $Response.StatusCode | Should -Be 200
+        Should -Invoke Get-Tenants -Times 1 -ParameterFilter { -not $TenantFilter }
+    }
+
     It 'rejects an unknown confirmed state' {
         $Response = Invoke-ExecDataResidency -Request (New-ExecRequest @{ Action = 'Confirm'; tenantFilter = 'kunde.ch'; ConfirmedState = 'Maybe' })
         $Response.StatusCode | Should -Be 400
@@ -160,5 +192,20 @@ Describe 'Invoke-ExecDataResidency' {
         }
         Should -Invoke Add-CIPPAzDataTableEntity -Times 1 -ParameterFilter { $Entity.JITUser -like 'oneict-dr-*@kunde.onmicrosoft.com' }
         ($Response.Body.Results | Where-Object { $_.state -eq 'info' }).copyField | Should -Match 'login_hint=oneict-dr-'
+    }
+
+    It 'keeps the one-time credentials when recording the JIT admin fails' {
+        Mock Test-CIPPAccess { $true }
+        Mock Add-CIPPAzDataTableEntity { throw 'storage unavailable' }
+        $Response = Invoke-ExecDataResidency -Request (New-ExecRequest @{ Action = 'PrepareJIT'; tenantFilter = 'kunde.ch' })
+        $Response.StatusCode | Should -Be 200
+        ($Response.Body.Results | Where-Object { $_.resultText -like 'Created User:*' }) | Should -Not -BeNullOrEmpty
+        ($Response.Body.Results | Where-Object { $_ -is [string] -and $_ -like 'Warning:*' }) | Should -Not -BeNullOrEmpty
+    }
+
+    It 'does not point to a TAP that was not created' {
+        Mock Test-CIPPAccess { $true }
+        $Response = Invoke-ExecDataResidency -Request (New-ExecRequest @{ Action = 'PrepareJIT'; tenantFilter = 'kunde.ch' })
+        ($Response.Body.Results | Where-Object { $_.state -eq 'info' }).resultText | Should -Match 'no TAP was created'
     }
 }
